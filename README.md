@@ -42,6 +42,25 @@ for im in images:
 ```
 更多信息请参阅[Tutorial][tutorial]。
 
+## Word 文档与公式
+Handright 现在支持混合文本与行内图片，配合 `InlineImage.from_latex` 可以渲染公式，
+同时使用 `docx_to_contents` 保留 Word 的段落缩进。
+
+```python
+from handright import InlineImage, docx_to_contents, handwrite, split_text_and_formula
+
+# 直接从字符串解析 $...$ 公式标记
+contents = split_text_and_formula(
+    "  首行缩进的文本，包含公式$\\frac{a}{b}$。",
+    InlineImage.from_latex,
+)
+
+# 或者从 Word 文档提取内容和缩进
+# contents = docx_to_contents("path/to/docx", formula_renderer=InlineImage.from_latex)
+
+images = handwrite(contents, template)
+```
+
 
 [tutorial]: docs/tutorial.md
 [PIL]: http://www.pythonware.com/products/pil/

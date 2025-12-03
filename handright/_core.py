@@ -1,10 +1,17 @@
 # coding: utf-8
 import itertools
 import math
+import random
+from dataclasses import dataclass
+from typing import Callable, Hashable, Iterable, Iterator, Sequence, Tuple, Union
+
+import PIL.Image
+import PIL.ImageDraw
 
 from handright._exceptions import *
 from handright._template import *
 from handright._util import *
+from handright.richtext import InlineImage
 
 # While changing following constants, it is necessary to consider to rewrite the
 # relevant codes.
@@ -21,8 +28,11 @@ _MAX_INT16_VALUE = 0xFFFF
 _STROKE_END = 0xFFFFFFFF
 
 
+Content = Union[str, InlineImage]
+
+
 def handwrite(
-        text: str,
+        text: Union[str, Iterable[Content]],
         template: Union[Template, Sequence[Template]],
         seed: Hashable = None,
         mapper: Callable[[Callable, Iterable], Iterable] = map,
@@ -67,8 +77,25 @@ def _draft(text, templates, seed=None) -> Iterator[Page]:
         yield page
 
 
-def _preprocess_text(text: str) -> str:
-    return text.replace(_CRLF, _LF).replace(_CR, _LF)
+def _preprocess_text(text) -> Tuple[Content, ...]:
+    if isinstance(text, str):
+        normalized = text.replace(_CRLF, _LF).replace(_CR, _LF)
+        return tuple(normalized)
+    if isinstance(text, Iterable):
+        result = []
+        for item in text:
+            if isinstance(item, str):
+                normalized = item.replace(_CRLF, _LF).replace(_CR, _LF)
+                result.extend(tuple(normalized))
+            elif isinstance(item, InlineImage):
+                result.append(item)
+            else:
+                msg = "text only accepts str or InlineImage, but get {}".format(
+                    type(item)
+                )
+                raise TypeError(msg)
+        return tuple(result)
+    raise TypeError("text must be str or an Iterable of str and InlineImage")
 
 
 def _check_template(page, tpl) -> None:
@@ -108,52 +135,92 @@ def _draw_page(
     y = top_margin + line_spacing - font_size
     while y <= height - bottom_margin - font_size:
         x = left_margin
+        glyphs = []
+        line_height = line_spacing
         while True:
-            if text[start] == _LF:
+            content = text[start]
+            if isinstance(content, str) and content == _LF:
                 start += 1
-                if start == len(text):
-                    return start
                 break
-            if (x > width - right_margin - 2 * font_size
-                    and text[start] in start_chars):
+
+            glyph = _plan_glyph(draw, x, y, content, tpl, rand)
+            break_for_wrap = False
+            if isinstance(content, str):
+                if (x > width - right_margin - 2 * font_size
+                        and content in start_chars):
+                    break_for_wrap = True
+                if (x > width - right_margin - font_size
+                        and content not in end_chars):
+                    break_for_wrap = True
+            if glyph.x >= width - right_margin or (
+                    glyph.x + glyph.width > width - right_margin):
+                break_for_wrap = True
+
+            if break_for_wrap and glyphs:
                 break
-            if (x > width - right_margin - font_size
-                    and text[start] not in end_chars):
-                break
-            if Feature.GRID_LAYOUT in tpl.get_features():
-                x = _grid_layout(draw, x, y, text[start], tpl, rand)
-            else:
-                x = _flow_layout(draw, x, y, text[start], tpl, rand)
+
+            glyphs.append(glyph)
+            line_height = max(line_height, glyph.height)
+            x = glyph.next_x
             start += 1
             if start == len(text):
-                return start
-        y += line_spacing
+                break
+        if glyphs:
+            _render_line(page.image, draw, y, glyphs)
+        if start == len(text):
+            return start
+        y += line_height
+        if y > height - bottom_margin - font_size:
+            return start
     return start
 
+@dataclass
+class _GlyphPlan(object):
+    x: float
+    y: float
+    width: int
+    height: int
+    next_x: float
+    render: Callable[[PIL.Image.Image, PIL.ImageDraw.ImageDraw, float], None]
 
-def _flow_layout(
-        draw, x, y, char, tpl: Template, rand: random.Random
-) -> float:
-    xy = (round(x), round(gauss(rand, y, tpl.get_line_spacing_sigma())))
-    font = _get_font(tpl, rand)
-    offset = _draw_char(draw, char, xy, font)
-    x += gauss(
+
+def _plan_glyph(draw, x, y, content, tpl: Template, rand: random.Random):
+    if Feature.GRID_LAYOUT in tpl.get_features():
+        return _grid_plan(draw, x, y, content, tpl, rand)
+    return _flow_plan(draw, x, y, content, tpl, rand)
+
+
+def _flow_plan(draw, x, y, content, tpl: Template, rand: random.Random):
+    y_actual = gauss(rand, y, tpl.get_line_spacing_sigma())
+    base_plan = _get_base_glyph(draw, x, y_actual, content, tpl, rand)
+    next_x = x + gauss(
         rand,
-        tpl.get_word_spacing() + offset,
-        tpl.get_word_spacing_sigma()
+        tpl.get_word_spacing() + base_plan.width,
+        tpl.get_word_spacing_sigma(),
     )
-    return x
+    return _GlyphPlan(
+        x=base_plan.x,
+        y=base_plan.y,
+        width=base_plan.width,
+        height=base_plan.height,
+        next_x=next_x,
+        render=base_plan.render,
+    )
 
 
-def _grid_layout(
-        draw, x, y, char, tpl: Template, rand: random.Random
-) -> float:
-    xy = (round(gauss(rand, x, tpl.get_word_spacing_sigma())),
-          round(gauss(rand, y, tpl.get_line_spacing_sigma())))
-    font = _get_font(tpl, rand)
-    _ = _draw_char(draw, char, xy, font)
-    x += tpl.get_word_spacing() + tpl.get_font().size
-    return x
+def _grid_plan(draw, x, y, content, tpl: Template, rand: random.Random):
+    x_actual = gauss(rand, x, tpl.get_word_spacing_sigma())
+    y_actual = gauss(rand, y, tpl.get_line_spacing_sigma())
+    base_plan = _get_base_glyph(draw, x_actual, y_actual, content, tpl, rand)
+    next_x = x + tpl.get_word_spacing() + base_plan.width
+    return _GlyphPlan(
+        x=base_plan.x,
+        y=base_plan.y,
+        width=base_plan.width,
+        height=base_plan.height,
+        next_x=next_x,
+        render=base_plan.render,
+    )
 
 
 def _get_font(tpl: Template, rand: random.Random):
@@ -166,12 +233,68 @@ def _get_font(tpl: Template, rand: random.Random):
     return font
 
 
+def _get_base_glyph(draw, x, y, content, tpl: Template, rand: random.Random):
+    if isinstance(content, InlineImage):
+        image = content.get_image(target_height=tpl.get_font().size)
+        mask = _to_internal_mask(image)
+        width, height = mask.size
+
+        def render(image_obj, draw_obj, line_y):
+            image_obj.paste(
+                _WHITE,
+                box=(round(x), round(line_y + (y - line_y))),
+                mask=mask,
+            )
+
+        return _GlyphPlan(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            next_x=x + tpl.get_word_spacing() + width,
+            render=render,
+        )
+
+    font = _get_font(tpl, rand)
+    left, top, right, bottom = font.getbbox(content)
+    width = right - left
+    height = bottom - top
+    xy = (round(x), round(y))
+
+    def render(image_obj, draw_obj, line_y):
+        _draw_char(draw_obj, content, xy, font)
+
+    return _GlyphPlan(
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        next_x=x + tpl.get_word_spacing() + width,
+        render=render,
+    )
+
+
+def _render_line(image, draw, y, glyphs: Sequence[_GlyphPlan]) -> None:
+    for glyph in glyphs:
+        glyph.render(image, draw, y)
+
+
 def _draw_char(draw, char: str, xy: Tuple[int, int], font) -> int:
     """Draws a single char with the parameters and white color, and returns the
     offset."""
     draw.text(xy, char, fill=_WHITE, font=font)
     left, top, right, bottom = font.getbbox(char)
     return right - left
+
+
+def _to_internal_mask(image: PIL.Image.Image) -> PIL.Image.Image:
+    if image.mode in ("LA", "RGBA"):
+        alpha = image.getchannel("A")
+        return alpha.point(lambda v: 255 if v > 0 else 0, mode=_INTERNAL_MODE)
+    if image.mode == _INTERNAL_MODE:
+        return image
+    gray = image.convert("L")
+    return gray.point(lambda v: 255 if v < 128 else 0, mode=_INTERNAL_MODE)
 
 
 class _Renderer(object):
