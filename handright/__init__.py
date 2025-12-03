@@ -25,13 +25,17 @@ processed.
 from handright._core import handwrite
 from handright._exceptions import Error, LayoutError, BackgroundTooLargeError
 from handright._template import Template, Feature
+from handright.richtext import InlineImage, docx_to_contents, split_text_and_formula
 
-__version__ = "8.2.0"
+__version__ = "8.3.0"
 
 __all__ = (
     "handwrite",
     "Template",
     "Feature",
+    "InlineImage",
+    "split_text_and_formula",
+    "docx_to_contents",
     "Error",
     "LayoutError",
     "BackgroundTooLargeError"

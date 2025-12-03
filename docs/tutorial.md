@@ -101,3 +101,17 @@ if __name__ == "__main__":
     ...
 
 ```
+
+### 公式与 Word 段落
+Handright 支持混合字符串和行内图片，从而通过 `InlineImage.from_latex` 渲染行内公式。
+若要保留 Word 文档的首行缩进和行内公式，可借助 `docx_to_contents`：
+
+```python
+from handright import InlineImage, docx_to_contents, handwrite
+
+contents = docx_to_contents(
+    "path/to/document.docx",
+    formula_renderer=InlineImage.from_latex,
+)
+images = handwrite(contents, template)
+```
